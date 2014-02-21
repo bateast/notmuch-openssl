@@ -52,6 +52,11 @@
        "Command to call openssl base executable. Could be short if in $PATH, or full path."
        :group 'notmuch-openssl
        :type 'string)
+     
+     (defcustom notmuch-openssl/save-received-cert "~/Mail/certs"
+       "If non nil, save received S/Mime certificate (in valid signed messages for example) in given path"
+       :group 'notmuch-openssl
+       :type  '(restricted-sexp :match-alternatives (stringp 'nil)))
    #+END_SRC
 
 * Verify /X.509/ S/Mime signature
@@ -90,13 +95,18 @@
                        (notmuch-check-exit-status (apply #'call-process openssl-command nil '(t t) nil args-serial)
                                                   (cons openssl-command args)
                                                   (buffer-string))
-                       (delete-char -1)
+                       (delete-char -1) (goto-char (point-min)) (delete-char 7)
                        (setq serial (buffer-string)))
-                     (delete-file openssl-usercert-file)
+                     (if notmuch-openssl/save-received-cert
+                         (let ((save-cert-filename 
+                                 (concat (file-name-as-directory notmuch-openssl/save-received-cert) email "-" serial ".pem")))
+                           (if (not (file-readable-p save-cert-filename))
+                               (rename-file openssl-usercert-file save-cert-filename)))
+                       (delete-file openssl-usercert-file))
                      (plist-put part :sigstatus (list (list :status "good" :keyid serial :userid email)))))
                   ((delete-file openssl-usercert-file)
                    (plist-put part :sigstatus '((:status "error" :keyid "")))))))
-              (nil))))  
+              (nil))))
   #+END_SRC
 
 ** Add /sigstatus/ creation as /advice/ to /notmuch-show-insert-part-multipart/signed/

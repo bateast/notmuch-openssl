@@ -1,0 +1,117 @@
+* Copyrights
+
+  #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el 
+    ;; Copyright (C) 2014 Baptiste Fouques
+    ;;
+    ;; Author: Baptiste Fouques
+    ;; Created: February 2014
+    ;; Version: 1.0
+    ;; Keywords: notmuch openssl smime encryption signature
+    ;;
+    ;; Notmuch-Openssl  for Emacs is free software; you  can redistribute  it and/or
+    ;; modify it under the  terms of the GNU General Public  License as published by
+    ;; the Free Software Foundation; either version 3, or (at your option) any later
+    ;; version.
+    ;;
+    ;; Notmuch-Openssl for Emacs is distributed in the hope that it  will be useful,
+    ;; but   WITHOUT  ANY   WARRANTY;   without  even   the   implied  warranty   of
+    ;; MERCHANTABILITY or  FITNESS FOR  A PARTICULAR PURPOSE.   See the  GNU General
+    ;; Public License for more details.
+    ;;
+    ;; You should have received a copy of the GNU General Public License
+    ;; along with GNU Emacs; see the file COPYING.  If not, write to
+    ;; the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+    ;; Boston, MA 02111-1307, USA.
+
+    ;; Options
+    ;;   customization is found in the groupe 'notmuch-openssl'
+    ;;   M-x customize-group notmuch-openssl
+  #+END_SRC
+
+* Provides
+
+  This package provides operations :
+  - openssl-create-sigstatus :: From a /notmuch/ /sexp/ representation of a message and a part, create relevant =:sigstatus= if message has been signed through /x509/ mechanism. Typically to be launch at construction of /notmuch-show/ buffer.
+
+  It adds /openssl-create-sigstatus/ as /before/ advice to /notmuch-show-insert-part-multipart/signed/.
+
+* Dependencies
+
+  No Elisp dependency. Though there is no use whithout using /notmuch/ as mail client.
+
+  It suppose that you have a working /openssl/ environment. /Openssl/ executable may be specified in custom group.
+  
+* Constants and customization
+
+** Customization
+
+   #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+     (defgroup notmuch-openssl nil "Openssl binding for Notmuch")
+     
+     (defcustom notmuch-openssl/openssl-command "openssl"
+       "Command to call openssl base executable. Could be short if in $PATH, or full path."
+       :group 'notmuch-openssl
+       :type 'string)
+   #+END_SRC
+
+* Verify /X.509/ S/Mime signature
+
+  #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+    (defun notmuch-openssl/create-sigstatus-from-openssl (msg part content-type nth depth button)
+      "If message is signed and sigstatus is nil, try to create sigstatus with openssl"
+      (let ((tag-signed (member "signed" (plist-get msg :tags)))
+            (signed (plist-member part :sigstatus))
+            (sigstatus (plist-get part :sigstatus)))
+        (cond ((and tag-signed signed (not sigstatus))
+               (let* ((filename (plist-get msg :filename))
+                      (openssl-usercert-file (make-temp-file "openssl-signer"))
+                      (args (list "smime" "-verify" "-in" filename "-signer" openssl-usercert-file "-out" "/dev/null"))
+                      (openssl-command "openssl")
+                      (openssl-output ""))
+                 (with-temp-buffer
+                   (notmuch-check-exit-status (apply #'call-process openssl-command nil '(t t) nil args)
+                                              (cons openssl-command args)
+                                              (buffer-string))
+                   (delete-char -1)
+                   (setq openssl-output (buffer-string)))
+                 (cond 
+                  ((string= openssl-output "Verification successful")
+                   (let ((args-email (list "x509" "-email" "-noout" "-in" openssl-usercert-file))
+                         (args-serial (list "x509" "-serial" "-noout" "-in" openssl-usercert-file ))
+                         (email "")
+                         (serial ""))
+                     (with-temp-buffer
+                       (notmuch-check-exit-status (apply #'call-process openssl-command nil '(t t) nil args-email)
+                                                  (cons openssl-command args)
+                                                  (buffer-string))
+                       (delete-char -1)
+                       (setq email (buffer-string)))
+                     (with-temp-buffer
+                       (notmuch-check-exit-status (apply #'call-process openssl-command nil '(t t) nil args-serial)
+                                                  (cons openssl-command args)
+                                                  (buffer-string))
+                       (delete-char -1)
+                       (setq serial (buffer-string)))
+                     (delete-file openssl-usercert-file)
+                     (plist-put part :sigstatus (list (list :status "good" :keyid serial :userid email)))))
+                  ((delete-file openssl-usercert-file)
+                   (plist-put part :sigstatus '((:status "error" :keyid "")))))))
+              (nil))))  
+  #+END_SRC
+
+** Add /sigstatus/ creation as /advice/ to /notmuch-show-insert-part-multipart/signed/
+
+   #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+     (defadvice notmuch-show-insert-part-multipart/signed (before notmuch-openssl/advice-create-sigstatus-from-openssl
+                                                                  (msg part content-type nth depth button))
+       (notmuch-openssl/create-sigstatus-from-openssl msg part content-type nth depth button))
+     
+     (ad-activate 'notmuch-show-insert-part-multipart/signed nil)
+   #+END_SRC
+   
+* Provide
+
+  #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+    (provide 'notmuch-openssl)
+  #+END_SRC
+  

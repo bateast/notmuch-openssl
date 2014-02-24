@@ -68,13 +68,15 @@
             (signed (plist-member part :sigstatus))
             (sigstatus (plist-get part :sigstatus)))
         (cond ((and tag-signed signed (not sigstatus))
+               
                (let* ((filename (plist-get msg :filename))
                       (openssl-usercert-file (make-temp-file "openssl-signer"))
                       (args (list "smime" "-verify" "-in" filename "-signer" openssl-usercert-file "-out" "/dev/null"))
                       (args-noverify (list "smime" "-verify" "-noverify" "-in" filename "-signer" openssl-usercert-file "-out" "/dev/null"))
                       (notmuch-openssl/openssl-command "openssl")
                       (good "")
-                      (self ""))
+                      (self "")
+                      (new_status '()))
                  (with-temp-buffer
                    (apply #'call-process notmuch-openssl/openssl-command nil '(t t) nil args)
                    (delete-char -1)
@@ -82,9 +84,12 @@
                  (with-temp-buffer
                    (apply #'call-process notmuch-openssl/openssl-command nil '(t t) nil args-noverify)
                    (delete-char -1)
-                   (setq self (string= (buffer-string) "Verification successful")))             
+                   (setq self (string= (buffer-string) "Verification successful")))
+                 
                  (cond 
                   ((or good self)
+                   (setq new_status (plist-put new_status :status "good"))
+    
                    (let ((args-email (list "x509" "-email" "-noout" "-in" openssl-usercert-file))
                          (args-serial (list "x509" "-serial" "-noout" "-in" openssl-usercert-file ))
                          (email "")
@@ -101,17 +106,20 @@
                                                   (buffer-string))
                        (delete-char -1) (goto-char (point-min)) (delete-char 7)
                        (setq serial (buffer-string)))
+    
                      (if notmuch-openssl/save-received-cert
                          (let ((save-cert-filename 
-                                 (concat (file-name-as-directory notmuch-openssl/save-received-cert) email "-" serial ".pem")))
-                           (if (not (file-readable-p save-cert-filename))
-                               (rename-file openssl-usercert-file save-cert-filename)))
-                       (delete-file openssl-usercert-file))
-                     (if good 
-                         (plist-put part :sigstatus (list (list :status "good" :userid (concat email " - " serial))))
-                         (plist-put part :sigstatus (list (list :status "good" :fingerprint (concat serial " self signed for " email)))))))
-                  ((delete-file openssl-usercert-file)
-                   (plist-put part :sigstatus '((:status "error" :keyid "")))))))
+                                (concat (file-name-as-directory notmuch-openssl/save-received-cert) email "-" serial ".pem")))
+                           (copy-file openssl-usercert-file save-cert-filename t)
+                           (setq new_status (plist-put new_status :cert-file save-cert-filename))))
+                     (if good
+                         (setq new_status (plist-put new_status :userid (concat email " - " serial)))
+                       (setq new_status (plist-put new_status :fingerprint (concat serial " self signed for " email))))))
+    
+                  ((setq new_status (plist-put new_status :status "error"))))
+    
+                 (setq part (plist-put part :sigstatus (list new_status)))
+                 (delete-file openssl-usercert-file)))
               (nil))))
   #+END_SRC
 
@@ -125,6 +133,29 @@
      (ad-activate 'notmuch-show-insert-part-multipart/signed nil)
    #+END_SRC
    
+* Show signature information
+
+  #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+    (defun notmuch-openssl/sigstatus-good-callback (button)
+      (let* ((sigstatus (button-get button :notmuch-sigstatus))
+             (cert-file (expand-file-name (plist-get sigstatus :cert-file)))
+             (buffer (get-buffer-create "*notmuch-crypto-gpg-out*")))
+        (with-current-buffer buffer
+          (goto-char (point-max))
+          (if cert-file
+              (call-process notmuch-openssl/openssl-command nil '(t t) t "x509" "-in" cert-file "-text")))))
+  #+END_SRC
+  
+** Add certificate information display is /advice/ to /notmuch-crypto-sigstatus-good-callback/
+
+   #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
+     (defadvice notmuch-crypto-sigstatus-good-callback (after notmuch-openssl/advice-sigstatus-good-callback (button))
+       (notmuch-openssl/sigstatus-good-callback button))
+     
+     (ad-activate 'notmuch-crypto-sigstatus-good-callback  nil)
+   #+END_SRC
+   
+
 * Provide
 
   #+BEGIN_SRC emacs-lisp :tangle notmuch-openssl.el
